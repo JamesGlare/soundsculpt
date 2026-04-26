@@ -1,9 +1,11 @@
 // coloured-shift-reverb : reverb_core.genexpr
 //
-// Stereo coloured smear/bloom core, single-sample feedback design with
-// optional analog-leaning shaping. Per-channel state with cross-channel
-// feedback coupling so the stereo image breathes instead of two
-// independent monos sitting side by side.
+// Stereo coloured smear/bloom core. The smear stage now uses 8 Schroeder
+// allpass filters on real delay lines (4 per channel) with per-line LFO
+// modulation of the read time when analog>0 -> chorus / spring-style
+// wobble in the tail. Per-channel feedback memories outside the smear keep
+// the bloom character and stereo cross-coupling so the image breathes
+// instead of two independent monos sitting side by side.
 //
 // Inlets:
 //   in 1, in 2 : dry stereo input
@@ -13,10 +15,11 @@
 // Params:
 //   drive   : 0..1 input/feedback nonlinearity amount.
 //   tone    : 0..1 dark <-> bright tilt on the input colour.
-//   size    : 0..1 smear amount and L/R cross-coupling strength.
+//   size    : 0..1 smear amount, base delay-line length, and L/R cross
+//             coupling strength.
 //   decay   : 0..1 feedback gain.
 //   damping : 0..1 highs lost per pass (1 = darkest).
-//   analog  : 0..1 amount of "analog" colour. Single dial gates five tricks:
+//   analog  : 0..1 amount of "analog" colour. Single dial gates six tricks:
 //              - asymmetric DC bias before tanh -> even-harmonic distortion
 //              - asymmetric soft-clip (different gain on positive vs negative
 //                halves of the curve) -> tube/triode-style asymmetric drive
@@ -24,6 +27,8 @@
 //                output -> tape-like per-pass darkening
 //              - L/R asymmetry on the bias and tilt for analog stereo drift
 //              - low-amplitude pseudo-noise injection in the feedback path
+//              - LFO modulation of the smear delay times -> chorus/spring
+//                wobble in the tail (decorrelated phases per line, L/R)
 
 // All Param + History declarations MUST precede any expression in a codebox.
 Param drive(0.2);
@@ -41,9 +46,23 @@ History Rlp1(0); History Rlp2(0); History Rlp3(0); History Rlp4(0);
 History Lfb1(0); History Lfb2(0); History Lfb3(0); History Lfb4(0);
 History Rfb1(0); History Rfb2(0); History Rfb3(0); History Rfb4(0);
 
-// Single-sample allpass-style smear state.
-History Lap1(0); History Lap2(0); History Lap3(0); History Lap4(0);
-History Rap1(0); History Rap2(0); History Rap3(0); History Rap4(0);
+// Schroeder-allpass-on-delay-line state. Each delay holds the internal
+// allpass state v[n] = x[n] + g * v[n-D]; output is y = -g*v + v[n-D].
+// Buffers are sized to comfortably hold base length + modulation depth
+// + linear-interp margin.
+Delay LapD1(1024);
+Delay LapD2(1024);
+Delay LapD3(1024);
+Delay LapD4(1024);
+Delay RapD1(1024);
+Delay RapD2(1024);
+Delay RapD3(1024);
+Delay RapD4(1024);
+
+// Per-line LFO phase accumulators (8 decorrelated phases). Stored as
+// 0..1, wrapped per sample.
+History phL1(0); History phL2(0.13); History phL3(0.27); History phL4(0.41);
+History phR1(0.08); History phR2(0.22); History phR3(0.36); History phR4(0.5);
 
 // Pre-emphasis filter state (one-pole high-shelf approximation per channel).
 History LpreHi(0);
@@ -115,17 +134,57 @@ l2R = Rlp2 + (l1R  - Rlp2) * dampR;
 l3R = Rlp3 + (l2R  - Rlp3) * dampR;
 l4R = Rlp4 + (l3R  - Rlp4) * dampR;
 
-// --- Smear (nested allpass-ish state). ---
-smearAmt = 0.18 + size * 0.42;
-sL1 = -smearAmt * l1L + Lap1;  ap1Lnext = l1L + smearAmt * sL1;
-sL2 = -smearAmt * l2L + Lap2;  ap2Lnext = l2L + smearAmt * sL2;
-sL3 = -smearAmt * l3L + Lap3;  ap3Lnext = l3L + smearAmt * sL3;
-sL4 = -smearAmt * l4L + Lap4;  ap4Lnext = l4L + smearAmt * sL4;
+// --- Smear: 8 Schroeder allpasses on modulated delay lines. ---
+// g is the allpass coefficient; same range as before so 'size' still
+// controls smear depth. Base delay lengths are prime-ish to decorrelate
+// the modes; size also scales the lengths so smaller size = tighter,
+// shorter smear, larger size = bigger room.
+g = 0.18 + size * 0.42;
+lenScale = 0.5 + size * 0.9;       // 0.5x .. 1.4x at size 0..1
 
-sR1 = -smearAmt * l1R + Rap1;  ap1Rnext = l1R + smearAmt * sR1;
-sR2 = -smearAmt * l2R + Rap2;  ap2Rnext = l2R + smearAmt * sR2;
-sR3 = -smearAmt * l3R + Rap3;  ap3Rnext = l3R + smearAmt * sR3;
-sR4 = -smearAmt * l4R + Rap4;  ap4Rnext = l4R + smearAmt * sR4;
+// Base lengths in samples (prime-ish, decorrelated L vs R).
+bL1 = 199 * lenScale; bL2 = 349 * lenScale; bL3 = 571 * lenScale; bL4 = 787 * lenScale;
+bR1 = 241 * lenScale; bR2 = 389 * lenScale; bR3 = 617 * lenScale; bR4 = 839 * lenScale;
+
+// LFO frequencies (Hz) per line. Mutually inharmonic so the modulation
+// never lines up across lines.
+fL1 = 0.31; fL2 = 0.47; fL3 = 0.59; fL4 = 0.71;
+fR1 = 0.37; fR2 = 0.53; fR3 = 0.61; fR4 = 0.79;
+TWO_PI = 6.283185307179586;
+srInv = 1.0 / samplerate;
+
+// Advance phases (wrap to [0,1)).
+phL1n = phL1 + fL1 * srInv;  phL1n = phL1n - floor(phL1n);
+phL2n = phL2 + fL2 * srInv;  phL2n = phL2n - floor(phL2n);
+phL3n = phL3 + fL3 * srInv;  phL3n = phL3n - floor(phL3n);
+phL4n = phL4 + fL4 * srInv;  phL4n = phL4n - floor(phL4n);
+phR1n = phR1 + fR1 * srInv;  phR1n = phR1n - floor(phR1n);
+phR2n = phR2 + fR2 * srInv;  phR2n = phR2n - floor(phR2n);
+phR3n = phR3 + fR3 * srInv;  phR3n = phR3n - floor(phR3n);
+phR4n = phR4 + fR4 * srInv;  phR4n = phR4n - floor(phR4n);
+
+// Modulation depth in samples, gated by analog. ~12 samples at full.
+modDepth = analog * 12;
+
+// Final read times (always >= 4 samples for safe linear interp).
+dL1 = max(4, bL1 + modDepth * sin(phL1n * TWO_PI));
+dL2 = max(4, bL2 + modDepth * sin(phL2n * TWO_PI));
+dL3 = max(4, bL3 + modDepth * sin(phL3n * TWO_PI));
+dL4 = max(4, bL4 + modDepth * sin(phL4n * TWO_PI));
+dR1 = max(4, bR1 + modDepth * sin(phR1n * TWO_PI));
+dR2 = max(4, bR2 + modDepth * sin(phR2n * TWO_PI));
+dR3 = max(4, bR3 + modDepth * sin(phR3n * TWO_PI));
+dR4 = max(4, bR4 + modDepth * sin(phR4n * TWO_PI));
+
+// Schroeder allpass on delay line. v[n] = x + g*v[n-D]; y = -g*v + v[n-D].
+vDelL1 = LapD1.read(dL1, interp="linear"); vL1 = l1L + g * vDelL1; sL1 = -g * vL1 + vDelL1; LapD1.write(vL1);
+vDelL2 = LapD2.read(dL2, interp="linear"); vL2 = l2L + g * vDelL2; sL2 = -g * vL2 + vDelL2; LapD2.write(vL2);
+vDelL3 = LapD3.read(dL3, interp="linear"); vL3 = l3L + g * vDelL3; sL3 = -g * vL3 + vDelL3; LapD3.write(vL3);
+vDelL4 = LapD4.read(dL4, interp="linear"); vL4 = l4L + g * vDelL4; sL4 = -g * vL4 + vDelL4; LapD4.write(vL4);
+vDelR1 = RapD1.read(dR1, interp="linear"); vR1 = l1R + g * vDelR1; sR1 = -g * vR1 + vDelR1; RapD1.write(vR1);
+vDelR2 = RapD2.read(dR2, interp="linear"); vR2 = l2R + g * vDelR2; sR2 = -g * vR2 + vDelR2; RapD2.write(vR2);
+vDelR3 = RapD3.read(dR3, interp="linear"); vR3 = l3R + g * vDelR3; sR3 = -g * vR3 + vDelR3; RapD3.write(vR3);
+vDelR4 = RapD4.read(dR4, interp="linear"); vR4 = l4R + g * vDelR4; sR4 = -g * vR4 + vDelR4; RapD4.write(vR4);
 
 // --- Feedback bloom with cross-channel coupling. ---
 fbAmt   = 0.18 + decay * 0.78;
@@ -187,8 +246,8 @@ Llp1 = l1L; Llp2 = l2L; Llp3 = l3L; Llp4 = l4L;
 Rlp1 = l1R; Rlp2 = l2R; Rlp3 = l3R; Rlp4 = l4R;
 Lfb1 = n1L; Lfb2 = n2L; Lfb3 = n3L; Lfb4 = n4L;
 Rfb1 = n1R; Rfb2 = n2R; Rfb3 = n3R; Rfb4 = n4R;
-Lap1 = ap1Lnext; Lap2 = ap2Lnext; Lap3 = ap3Lnext; Lap4 = ap4Lnext;
-Rap1 = ap1Rnext; Rap2 = ap2Rnext; Rap3 = ap3Rnext; Rap4 = ap4Rnext;
+phL1 = phL1n; phL2 = phL2n; phL3 = phL3n; phL4 = phL4n;
+phR1 = phR1n; phR2 = phR2n; phR3 = phR3n; phR4 = phR4n;
 LpreHi = LpreHiNext;
 RpreHi = RpreHiNext;
 
