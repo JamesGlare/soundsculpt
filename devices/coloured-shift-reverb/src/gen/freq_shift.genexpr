@@ -1,0 +1,28 @@
+// coloured-shift-reverb : freq_shift.genexpr
+//
+// First serious placeholder for tail motion.
+// This is not a mathematically pure frequency shifter yet. It is a compact
+// ring-mod / sideband-style movement stage that already gives the tail animated,
+// inharmonic spectral drift. Later we can swap this for a more proper quadrature
+// implementation.
+
+Param shift(0.0);
+Param blend(0.0);
+Param stereoPhase(0.17);
+
+in = in1;
+
+// Keep the control range useful at low values.
+rate = 0.03 + abs(shift) * abs(shift) * 8;
+phaseA = cycle(rate);
+phaseB = cycle(rate + stereoPhase);
+
+// Two simple modulation branches to create asymmetrical sideband flavour.
+rmA = in * phaseA;
+rmB = in * (phaseB * 0.6 + phaseA * 0.4);
+shifted = mix(rmA, rmB, 0.5 + 0.45 * sign(shift + 0.0001));
+
+// Gentle saturation so the tail stays compact.
+shifted = tanh(shifted * 1.4);
+
+out1 = mix(in, shifted, blend);

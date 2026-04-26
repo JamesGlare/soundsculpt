@@ -1,0 +1,85 @@
+// coloured-shift-reverb : reverb_core.genexpr
+//
+// First serious draft, still intentionally simple.
+// This is not a full lush tank yet. It is a compact text-first smear / bloom core
+// built from nonlinear colour, one-pole damping, and short feedback stages using
+// histories. The goal is to create a musically useful starting point that we can
+// later replace or extend with longer delay-based diffusion.
+
+Param drive(0.2);
+Param tone(0.5);
+Param size(0.5);
+Param decay(0.55);
+Param damping(0.45);
+Param wet(1.0);
+
+History lp1(0);
+History lp2(0);
+History lp3(0);
+History lp4(0);
+History fb1(0);
+History fb2(0);
+History fb3(0);
+History fb4(0);
+History ap1(0);
+History ap2(0);
+History ap3(0);
+History ap4(0);
+
+in = in1;
+
+// Input colour, soft and controllable.
+preGain = 1 + drive * 4;
+coloured = tanh(in * preGain);
+colourMix = mix(in, coloured, 0.2 + drive * 0.55);
+
+// Tone, tilted dark to bright around the coloured input.
+bright = colourMix - lp1;
+tilt = mix(lp1, bright * 1.6, tone);
+
+// One-pole smoothing stages. Higher damping means darker / slower tail.
+dampCoef = 0.08 + (1 - damping) * 0.5;
+l1 = lp1 + (tilt - lp1) * dampCoef;
+l2 = lp2 + (l1 - lp2) * dampCoef;
+l3 = lp3 + (l2 - lp3) * dampCoef;
+l4 = lp4 + (l3 - lp4) * dampCoef;
+
+// Tiny allpass-ish smear sections built from single-sample state.
+// These are deliberately modest but give the tail some blur and thickness.
+smearAmt = 0.18 + size * 0.42;
+a1 = -smearAmt * l1 + ap1;
+ap1n = l1 + smearAmt * a1;
+a2 = -smearAmt * l2 + ap2;
+ap2n = l2 + smearAmt * a2;
+a3 = -smearAmt * l3 + ap3;
+ap3n = l3 + smearAmt * a3;
+a4 = -smearAmt * l4 + ap4;
+ap4n = l4 + smearAmt * a4;
+
+// Feedback bloom. Size slightly increases cross-coupling, decay controls tail.
+fbAmt = 0.18 + decay * 0.78;
+cross = 0.05 + size * 0.18;
+
+n1 = tanh(a1 + fb1 * fbAmt + fb3 * cross * 0.7);
+n2 = tanh(a2 + fb2 * fbAmt - fb4 * cross * 0.7);
+n3 = tanh(a3 + fb3 * fbAmt + fb1 * cross);
+n4 = tanh(a4 + fb4 * fbAmt - fb2 * cross);
+
+body = (n1 + n2 + n3 + n4) * 0.25;
+body = tanh(body * (1.1 + drive * 0.35));
+
+// State updates at end.
+lp1 = l1;
+lp2 = l2;
+lp3 = l3;
+lp4 = l4;
+fb1 = n1;
+fb2 = n2;
+fb3 = n3;
+fb4 = n4;
+ap1 = ap1n;
+ap2 = ap2n;
+ap3 = ap3n;
+ap4 = ap4n;
+
+out1 = mix(in, body, wet);
