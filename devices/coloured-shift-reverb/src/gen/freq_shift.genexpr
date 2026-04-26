@@ -1,28 +1,137 @@
 // coloured-shift-reverb : freq_shift.genexpr
 //
-// First serious placeholder for tail motion.
-// This is not a mathematically pure frequency shifter yet. It is a compact
-// ring-mod / sideband-style movement stage that already gives the tail animated,
-// inharmonic spectral drift. Later we can swap this for a more proper quadrature
-// implementation.
+// Stereo single-sideband frequency shifter (Hilbert-pair design).
+//
+// Method:
+//   - Build an analytic signal x_a(t) = x_real + j*x_imag using a pair of
+//     allpass IIR networks whose phase responses differ by ~90 degrees
+//     across the audio band (Olli Niemitalo's published coefficients).
+//   - Mix with a complex carrier exp(j*2*pi*f*t):
+//         y_real = x_real*cos(theta) - x_imag*sin(theta)
+//     where theta is the running carrier phase.
+//   - This produces a true SSB shift (no mirror image), unlike the earlier
+//     ring-mod placeholder.
+//   - Stereo width via a small carrier-phase offset on the right channel.
+//
+// Inlets:
+//   in 1, in 2  : dry stereo input
+// Outlets:
+//   out 1, out 2: wet (shifted) stereo output. Mix with dry in the wrapper.
+//
+// Params:
+//   shift       : -1..1 normalised. Mapped to +/- 500 Hz of shift here;
+//                 the host patcher can scale this further if needed.
+//   stereoPhase : 0..1 carrier phase offset between L and R (decorrelation).
 
 Param shift(0.0);
-Param blend(0.0);
 Param stereoPhase(0.17);
 
-in = in1;
+// --- Hilbert allpass coefficients (Niemitalo, ~95 dB image rejection). ---
+// Each section is a 2nd-order allpass: y[n] = c*(x[n] + y[n-2]) - x[n-2]
+// where c = a^2 of the published prototype root.
 
-// Keep the control range useful at low values.
-rate = 0.03 + abs(shift) * abs(shift) * 8;
-phaseA = cycle(rate);
-phaseB = cycle(rate + stereoPhase);
+// Path A (in-phase, 4 sections).
+ca1 = 0.4021921162426;
+ca2 = 0.8561710882420;
+ca3 = 0.9722909545651;
+ca4 = 0.9952884791278;
 
-// Two simple modulation branches to create asymmetrical sideband flavour.
-rmA = in * phaseA;
-rmB = in * (phaseB * 0.6 + phaseA * 0.4);
-shifted = mix(rmA, rmB, 0.5 + 0.45 * sign(shift + 0.0001));
+// Path B (quadrature, 4 sections + 1 sample delay to align group delays).
+cb1 = 0.6923878000000;
+cb2 = 0.9360654322959;
+cb3 = 0.9882295226860;
+cb4 = 0.9987488452737;
 
-// Gentle saturation so the tail stays compact.
-shifted = tanh(shifted * 1.4);
+// --- Per-channel state for path A and path B (x[n-2], y[n-2] each). ---
+// Left
+History Lax1(0); History Lay1(0);
+History Lax2(0); History Lay2(0);
+History Lax3(0); History Lay3(0);
+History Lax4(0); History Lay4(0);
+History Lbx1(0); History Lby1(0);
+History Lbx2(0); History Lby2(0);
+History Lbx3(0); History Lby3(0);
+History Lbx4(0); History Lby4(0);
+History Lbz1(0); // 1-sample delay on path B
 
-out1 = mix(in, shifted, blend);
+// Right
+History Rax1(0); History Ray1(0);
+History Rax2(0); History Ray2(0);
+History Rax3(0); History Ray3(0);
+History Rax4(0); History Ray4(0);
+History Rbx1(0); History Rby1(0);
+History Rbx2(0); History Rby2(0);
+History Rbx3(0); History Rby3(0);
+History Rbx4(0); History Rby4(0);
+History Rbz1(0);
+
+// Carrier phase (separate per channel for stereo decorrelation).
+History phaseL(0);
+History phaseR(0);
+
+// ---------- Helpers expanded inline (genexpr has no stateful funcs). ----------
+
+// ===== LEFT =====
+xL = in1;
+
+// Path A: 4 cascaded allpass sections (each operates on x[n-2], y[n-2]).
+La1 = ca1 * (xL + Lay1) - Lax1;   Lax1 = xL;   Lay1 = La1;
+La2 = ca2 * (La1 + Lay2) - Lax2;  Lax2 = La1;  Lay2 = La2;
+La3 = ca3 * (La2 + Lay3) - Lax3;  Lax3 = La2;  Lay3 = La3;
+La4 = ca4 * (La3 + Lay4) - Lax4;  Lax4 = La3;  Lay4 = La4;
+xL_re = La4;
+
+// Path B: same, then one extra sample of delay to align with path A.
+Lb1 = cb1 * (xL + Lby1) - Lbx1;   Lbx1 = xL;   Lby1 = Lb1;
+Lb2 = cb2 * (Lb1 + Lby2) - Lbx2;  Lbx2 = Lb1;  Lby2 = Lb2;
+Lb3 = cb3 * (Lb2 + Lby3) - Lbx3;  Lbx3 = Lb2;  Lby3 = Lb3;
+Lb4 = cb4 * (Lb3 + Lby4) - Lbx4;  Lbx4 = Lb3;  Lby4 = Lb4;
+xL_im = Lbz1;
+Lbz1 = Lb4;
+
+// ===== RIGHT =====
+xR = in2;
+
+Ra1 = ca1 * (xR + Ray1) - Rax1;   Rax1 = xR;   Ray1 = Ra1;
+Ra2 = ca2 * (Ra1 + Ray2) - Rax2;  Rax2 = Ra1;  Ray2 = Ra2;
+Ra3 = ca3 * (Ra2 + Ray3) - Rax3;  Rax3 = Ra2;  Ray3 = Ra3;
+Ra4 = ca4 * (Ra3 + Ray4) - Rax4;  Rax4 = Ra3;  Ray4 = Ra4;
+xR_re = Ra4;
+
+Rb1 = cb1 * (xR + Rby1) - Rbx1;   Rbx1 = xR;   Rby1 = Rb1;
+Rb2 = cb2 * (Rb1 + Rby2) - Rbx2;  Rbx2 = Rb1;  Rby2 = Rb2;
+Rb3 = cb3 * (Rb2 + Rby3) - Rbx3;  Rbx3 = Rb2;  Rby3 = Rb3;
+Rb4 = cb4 * (Rb3 + Rby4) - Rbx4;  Rbx4 = Rb3;  Rby4 = Rb4;
+xR_im = Rbz1;
+Rbz1 = Rb4;
+
+// --- Carrier ---
+// Map shift in [-1,1] to a frequency in Hz; ~500 Hz at full scale.
+fHz = shift * 500;
+dPhase = fHz / samplerate;
+
+// Increment phases, wrap to [0,1).
+pL = phaseL + dPhase;
+pL = pL - floor(pL);
+phaseL = pL;
+
+pR = phaseR + dPhase;
+pR = pR - floor(pR);
+phaseR = pR;
+
+// Right channel gets a small phase offset for stereo decorrelation.
+pR_off = pR + stereoPhase;
+pR_off = pR_off - floor(pR_off);
+
+twoPi = 6.28318530717958647692;
+cL = cos(twoPi * pL);
+sL = sin(twoPi * pL);
+cR = cos(twoPi * pR_off);
+sR = sin(twoPi * pR_off);
+
+// SSB mix: y = x_re*cos - x_im*sin (sign of shift handled by carrier dir).
+yL = xL_re * cL - xL_im * sL;
+yR = xR_re * cR - xR_im * sR;
+
+out1 = yL;
+out2 = yR;

@@ -1,85 +1,108 @@
 // coloured-shift-reverb : reverb_core.genexpr
 //
-// First serious draft, still intentionally simple.
-// This is not a full lush tank yet. It is a compact text-first smear / bloom core
-// built from nonlinear colour, one-pole damping, and short feedback stages using
-// histories. The goal is to create a musically useful starting point that we can
-// later replace or extend with longer delay-based diffusion.
+// Stereo coloured smear/bloom core, single-sample feedback design.
+// Not a full delay-tank reverb yet; this is the compact text-first DSP
+// foundation. Per-channel state with cross-channel feedback coupling so the
+// stereo image actually breathes instead of two independent monos sitting
+// side by side.
+//
+// Inlets:
+//   in 1, in 2 : dry stereo input
+// Outlets:
+//   out 1, out 2: 100% wet stereo output. Wrapper handles dry/wet.
+//
+// Params:
+//   drive   : 0..1 input/feedback nonlinearity amount.
+//   tone    : 0..1 dark <-> bright tilt on the input colour.
+//   size    : 0..1 smear amount and L/R cross-coupling strength.
+//   decay   : 0..1 feedback gain.
+//   damping : 0..1 highs lost per pass (1 = darkest).
 
 Param drive(0.2);
 Param tone(0.5);
 Param size(0.5);
 Param decay(0.55);
 Param damping(0.45);
-Param wet(1.0);
 
-History lp1(0);
-History lp2(0);
-History lp3(0);
-History lp4(0);
-History fb1(0);
-History fb2(0);
-History fb3(0);
-History fb4(0);
-History ap1(0);
-History ap2(0);
-History ap3(0);
-History ap4(0);
+// Per-channel one-pole damping cascade (4 stages each).
+History Llp1(0); History Llp2(0); History Llp3(0); History Llp4(0);
+History Rlp1(0); History Rlp2(0); History Rlp3(0); History Rlp4(0);
 
-in = in1;
+// Per-channel feedback memories (4 nodes each).
+History Lfb1(0); History Lfb2(0); History Lfb3(0); History Lfb4(0);
+History Rfb1(0); History Rfb2(0); History Rfb3(0); History Rfb4(0);
 
-// Input colour, soft and controllable.
+// Single-sample allpass-style smear state.
+History Lap1(0); History Lap2(0); History Lap3(0); History Lap4(0);
+History Rap1(0); History Rap2(0); History Rap3(0); History Rap4(0);
+
+// --- Input colour stage (per channel, deliberately matched). ---
 preGain = 1 + drive * 4;
-coloured = tanh(in * preGain);
-colourMix = mix(in, coloured, 0.2 + drive * 0.55);
+colL = tanh(in1 * preGain);
+colR = tanh(in2 * preGain);
+mixAmt = 0.2 + drive * 0.55;
+cL = mix(in1, colL, mixAmt);
+cR = mix(in2, colR, mixAmt);
 
-// Tone, tilted dark to bright around the coloured input.
-bright = colourMix - lp1;
-tilt = mix(lp1, bright * 1.6, tone);
+// Tone tilt around the first lowpass tap.
+brightL = cL - Llp1;
+brightR = cR - Rlp1;
+tiltL = mix(Llp1, brightL * 1.6, tone);
+tiltR = mix(Rlp1, brightR * 1.6, tone);
 
-// One-pole smoothing stages. Higher damping means darker / slower tail.
+// --- Damping cascade. ---
 dampCoef = 0.08 + (1 - damping) * 0.5;
-l1 = lp1 + (tilt - lp1) * dampCoef;
-l2 = lp2 + (l1 - lp2) * dampCoef;
-l3 = lp3 + (l2 - lp3) * dampCoef;
-l4 = lp4 + (l3 - lp4) * dampCoef;
+l1L = Llp1 + (tiltL - Llp1) * dampCoef;
+l2L = Llp2 + (l1L  - Llp2) * dampCoef;
+l3L = Llp3 + (l2L  - Llp3) * dampCoef;
+l4L = Llp4 + (l3L  - Llp4) * dampCoef;
 
-// Tiny allpass-ish smear sections built from single-sample state.
-// These are deliberately modest but give the tail some blur and thickness.
+l1R = Rlp1 + (tiltR - Rlp1) * dampCoef;
+l2R = Rlp2 + (l1R  - Rlp2) * dampCoef;
+l3R = Rlp3 + (l2R  - Rlp3) * dampCoef;
+l4R = Rlp4 + (l3R  - Rlp4) * dampCoef;
+
+// --- Smear (nested allpass-ish state). ---
 smearAmt = 0.18 + size * 0.42;
-a1 = -smearAmt * l1 + ap1;
-ap1n = l1 + smearAmt * a1;
-a2 = -smearAmt * l2 + ap2;
-ap2n = l2 + smearAmt * a2;
-a3 = -smearAmt * l3 + ap3;
-ap3n = l3 + smearAmt * a3;
-a4 = -smearAmt * l4 + ap4;
-ap4n = l4 + smearAmt * a4;
+sL1 = -smearAmt * l1L + Lap1;  ap1Lnext = l1L + smearAmt * sL1;
+sL2 = -smearAmt * l2L + Lap2;  ap2Lnext = l2L + smearAmt * sL2;
+sL3 = -smearAmt * l3L + Lap3;  ap3Lnext = l3L + smearAmt * sL3;
+sL4 = -smearAmt * l4L + Lap4;  ap4Lnext = l4L + smearAmt * sL4;
 
-// Feedback bloom. Size slightly increases cross-coupling, decay controls tail.
-fbAmt = 0.18 + decay * 0.78;
-cross = 0.05 + size * 0.18;
+sR1 = -smearAmt * l1R + Rap1;  ap1Rnext = l1R + smearAmt * sR1;
+sR2 = -smearAmt * l2R + Rap2;  ap2Rnext = l2R + smearAmt * sR2;
+sR3 = -smearAmt * l3R + Rap3;  ap3Rnext = l3R + smearAmt * sR3;
+sR4 = -smearAmt * l4R + Rap4;  ap4Rnext = l4R + smearAmt * sR4;
 
-n1 = tanh(a1 + fb1 * fbAmt + fb3 * cross * 0.7);
-n2 = tanh(a2 + fb2 * fbAmt - fb4 * cross * 0.7);
-n3 = tanh(a3 + fb3 * fbAmt + fb1 * cross);
-n4 = tanh(a4 + fb4 * fbAmt - fb2 * cross);
+// --- Feedback bloom with cross-channel coupling. ---
+fbAmt   = 0.18 + decay * 0.78;
+intra   = 0.05 + size * 0.18;     // within-channel cross between nodes
+crossLR = 0.10 + size * 0.30;     // L<->R coupling, scaled with size
 
-body = (n1 + n2 + n3 + n4) * 0.25;
-body = tanh(body * (1.1 + drive * 0.35));
+// Left network draws from its own fb chain plus a tap from the right side.
+n1L = tanh(sL1 + Lfb1 * fbAmt + Lfb3 * intra * 0.7 + Rfb2 * crossLR * 0.5);
+n2L = tanh(sL2 + Lfb2 * fbAmt - Lfb4 * intra * 0.7 + Rfb3 * crossLR * 0.5);
+n3L = tanh(sL3 + Lfb3 * fbAmt + Lfb1 * intra       - Rfb4 * crossLR * 0.5);
+n4L = tanh(sL4 + Lfb4 * fbAmt - Lfb2 * intra       + Rfb1 * crossLR * 0.5);
 
-// State updates at end.
-lp1 = l1;
-lp2 = l2;
-lp3 = l3;
-lp4 = l4;
-fb1 = n1;
-fb2 = n2;
-fb3 = n3;
-fb4 = n4;
-ap1 = ap1n;
-ap2 = ap2n;
-ap3 = ap3n;
-ap4 = ap4n;
+n1R = tanh(sR1 + Rfb1 * fbAmt + Rfb3 * intra * 0.7 + Lfb2 * crossLR * 0.5);
+n2R = tanh(sR2 + Rfb2 * fbAmt - Rfb4 * intra * 0.7 + Lfb3 * crossLR * 0.5);
+n3R = tanh(sR3 + Rfb3 * fbAmt + Rfb1 * intra       - Lfb4 * crossLR * 0.5);
+n4R = tanh(sR4 + Rfb4 * fbAmt - Rfb2 * intra       + Lfb1 * crossLR * 0.5);
 
-out1 = mix(in, body, wet);
+bodyL = (n1L + n2L + n3L + n4L) * 0.25;
+bodyR = (n1R + n2R + n3R + n4R) * 0.25;
+
+bodyL = tanh(bodyL * (1.1 + drive * 0.35));
+bodyR = tanh(bodyR * (1.1 + drive * 0.35));
+
+// --- State updates. ---
+Llp1 = l1L; Llp2 = l2L; Llp3 = l3L; Llp4 = l4L;
+Rlp1 = l1R; Rlp2 = l2R; Rlp3 = l3R; Rlp4 = l4R;
+Lfb1 = n1L; Lfb2 = n2L; Lfb3 = n3L; Lfb4 = n4L;
+Rfb1 = n1R; Rfb2 = n2R; Rfb3 = n3R; Rfb4 = n4R;
+Lap1 = ap1Lnext; Lap2 = ap2Lnext; Lap3 = ap3Lnext; Lap4 = ap4Lnext;
+Rap1 = ap1Rnext; Rap2 = ap2Rnext; Rap3 = ap3Rnext; Rap4 = ap4Rnext;
+
+out1 = bodyL;
+out2 = bodyR;
