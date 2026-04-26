@@ -16,10 +16,12 @@
 //   size    : 0..1 smear amount and L/R cross-coupling strength.
 //   decay   : 0..1 feedback gain.
 //   damping : 0..1 highs lost per pass (1 = darkest).
-//   analog  : 0..1 amount of "analog" colour:
+//   analog  : 0..1 amount of "analog" colour. Single dial gates five tricks:
 //              - asymmetric DC bias before tanh -> even-harmonic distortion
-//              - pre-emphasis going into the feedback loop, de-emphasis
-//                coming out -> tape-like darkening per pass
+//              - asymmetric soft-clip (different gain on positive vs negative
+//                halves of the curve) -> tube/triode-style asymmetric drive
+//              - pre-emphasis going into the feedback loop, de-emphasis at
+//                output -> tape-like per-pass darkening
 //              - L/R asymmetry on the bias and tilt for analog stereo drift
 //              - low-amplitude pseudo-noise injection in the feedback path
 
@@ -66,17 +68,23 @@ preBoost = analog * 0.7;
 xL = in1 + (in1 - LpreHiNext) * preBoost;
 xR = in2 + (in2 - RpreHiNext) * preBoost;
 
-// --- Input colour stage (per channel, with optional asymmetric bias). ---
+// --- Asymmetric soft-clip gain (used everywhere we used to call plain tanh). ---
+// y = tanh(x * (1 + asymGain * sign(x))).
+// At asymGain=0 this is plain tanh. At asymGain>0 the positive half compresses
+// harder than the negative half (or vice versa), giving even-harmonic content
+// independent of (and stacking with) the DC bias trick below.
+asymGain = analog * 0.20;
+
+// --- Input colour stage (per channel, bias + asymmetric soft-clip). ---
 preGain = 1 + drive * 4;
-// Asymmetric DC bias before tanh -> even harmonics. L and R get opposite
+// Asymmetric DC bias before saturation -> even harmonics. L and R get opposite
 // biases so the stereo image drifts apart slightly when analog goes up.
 biasL = analog * 0.18;
 biasR = analog * -0.15;  // not the same magnitude on purpose
-colL = tanh(xL * preGain + biasL);
-colR = tanh(xR * preGain + biasR);
-// Pull out the DC the bias introduced so we don't leak it downstream.
-colL = colL - tanh(biasL);
-colR = colR - tanh(biasR);
+inArgL = xL * preGain + biasL;
+inArgR = xR * preGain + biasR;
+colL = tanh(inArgL * (1 + asymGain * sign(inArgL))) - tanh(biasL * (1 + asymGain * sign(biasL)));
+colR = tanh(inArgR * (1 + asymGain * sign(inArgR))) - tanh(biasR * (1 + asymGain * sign(biasR)));
 
 mixAmt = 0.2 + drive * 0.55;
 cL = mix(xL, colL, mixAmt);
@@ -129,27 +137,38 @@ nAmp = analog * 0.0005;
 nL = nf * nAmp;
 nR = nf * nAmp * 0.97;             // not perfectly correlated
 
-// Asymmetric saturation: small bias before tanh, removed afterward.
-// Same idea as input stage but per-node and lighter, so the feedback loop
-// itself contributes even-order content.
-fbBias = analog * 0.08;
+// Per-node asymmetric saturation: bias + asym soft-clip.
+// Bias is constant per node, so the DC compensation can be precomputed.
+fbBias    = analog * 0.08;
 fbBiasNeg = -fbBias;
+fbBiasComp    = tanh(fbBias    * (1 + asymGain));   // sign(+fbBias) = 1
+fbBiasNegComp = tanh(fbBiasNeg * (1 - asymGain));   // sign(-fbBias) = -1
 
-n1L = tanh(sL1 + Lfb1 * fbAmt + Lfb3 * intra * 0.7 + Rfb2 * crossLR * 0.5 + fbBias    + nL) - tanh(fbBias);
-n2L = tanh(sL2 + Lfb2 * fbAmt - Lfb4 * intra * 0.7 + Rfb3 * crossLR * 0.5 + fbBiasNeg + nL) - tanh(fbBiasNeg);
-n3L = tanh(sL3 + Lfb3 * fbAmt + Lfb1 * intra       - Rfb4 * crossLR * 0.5 + fbBias    + nL) - tanh(fbBias);
-n4L = tanh(sL4 + Lfb4 * fbAmt - Lfb2 * intra       + Rfb1 * crossLR * 0.5 + fbBiasNeg + nL) - tanh(fbBiasNeg);
+a1L = sL1 + Lfb1 * fbAmt + Lfb3 * intra * 0.7 + Rfb2 * crossLR * 0.5 + fbBias    + nL;
+a2L = sL2 + Lfb2 * fbAmt - Lfb4 * intra * 0.7 + Rfb3 * crossLR * 0.5 + fbBiasNeg + nL;
+a3L = sL3 + Lfb3 * fbAmt + Lfb1 * intra       - Rfb4 * crossLR * 0.5 + fbBias    + nL;
+a4L = sL4 + Lfb4 * fbAmt - Lfb2 * intra       + Rfb1 * crossLR * 0.5 + fbBiasNeg + nL;
+n1L = tanh(a1L * (1 + asymGain * sign(a1L))) - fbBiasComp;
+n2L = tanh(a2L * (1 + asymGain * sign(a2L))) - fbBiasNegComp;
+n3L = tanh(a3L * (1 + asymGain * sign(a3L))) - fbBiasComp;
+n4L = tanh(a4L * (1 + asymGain * sign(a4L))) - fbBiasNegComp;
 
-n1R = tanh(sR1 + Rfb1 * fbAmt + Rfb3 * intra * 0.7 + Lfb2 * crossLR * 0.5 + fbBiasNeg + nR) - tanh(fbBiasNeg);
-n2R = tanh(sR2 + Rfb2 * fbAmt - Rfb4 * intra * 0.7 + Lfb3 * crossLR * 0.5 + fbBias    + nR) - tanh(fbBias);
-n3R = tanh(sR3 + Rfb3 * fbAmt + Rfb1 * intra       - Lfb4 * crossLR * 0.5 + fbBiasNeg + nR) - tanh(fbBiasNeg);
-n4R = tanh(sR4 + Rfb4 * fbAmt - Rfb2 * intra       + Lfb1 * crossLR * 0.5 + fbBias    + nR) - tanh(fbBias);
+a1R = sR1 + Rfb1 * fbAmt + Rfb3 * intra * 0.7 + Lfb2 * crossLR * 0.5 + fbBiasNeg + nR;
+a2R = sR2 + Rfb2 * fbAmt - Rfb4 * intra * 0.7 + Lfb3 * crossLR * 0.5 + fbBias    + nR;
+a3R = sR3 + Rfb3 * fbAmt + Rfb1 * intra       - Lfb4 * crossLR * 0.5 + fbBiasNeg + nR;
+a4R = sR4 + Rfb4 * fbAmt - Rfb2 * intra       + Lfb1 * crossLR * 0.5 + fbBias    + nR;
+n1R = tanh(a1R * (1 + asymGain * sign(a1R))) - fbBiasNegComp;
+n2R = tanh(a2R * (1 + asymGain * sign(a2R))) - fbBiasComp;
+n3R = tanh(a3R * (1 + asymGain * sign(a3R))) - fbBiasNegComp;
+n4R = tanh(a4R * (1 + asymGain * sign(a4R))) - fbBiasComp;
 
 bodyL = (n1L + n2L + n3L + n4L) * 0.25;
 bodyR = (n1R + n2R + n3R + n4R) * 0.25;
 
-bodyL = tanh(bodyL * (1.1 + drive * 0.35));
-bodyR = tanh(bodyR * (1.1 + drive * 0.35));
+bArgL = bodyL * (1.1 + drive * 0.35);
+bArgR = bodyR * (1.1 + drive * 0.35);
+bodyL = tanh(bArgL * (1 + asymGain * sign(bArgL)));
+bodyR = tanh(bArgR * (1 + asymGain * sign(bArgR)));
 
 // --- De-emphasis on the way out (gentle high-shelf cut). ---
 // Cancels the steady-state lift of pre-emphasis on the dry path while
