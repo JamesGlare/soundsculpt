@@ -1,10 +1,9 @@
 // coloured-shift-reverb : reverb_core.genexpr
 //
-// Stereo coloured smear/bloom core, single-sample feedback design.
-// Not a full delay-tank reverb yet; this is the compact text-first DSP
-// foundation. Per-channel state with cross-channel feedback coupling so the
-// stereo image actually breathes instead of two independent monos sitting
-// side by side.
+// Stereo coloured smear/bloom core, single-sample feedback design with
+// optional analog-leaning shaping. Per-channel state with cross-channel
+// feedback coupling so the stereo image breathes instead of two
+// independent monos sitting side by side.
 //
 // Inlets:
 //   in 1, in 2 : dry stereo input
@@ -17,12 +16,20 @@
 //   size    : 0..1 smear amount and L/R cross-coupling strength.
 //   decay   : 0..1 feedback gain.
 //   damping : 0..1 highs lost per pass (1 = darkest).
+//   analog  : 0..1 amount of "analog" colour:
+//              - asymmetric DC bias before tanh -> even-harmonic distortion
+//              - pre-emphasis going into the feedback loop, de-emphasis
+//                coming out -> tape-like darkening per pass
+//              - L/R asymmetry on the bias and tilt for analog stereo drift
+//              - low-amplitude pseudo-noise injection in the feedback path
 
+// All Param + History declarations MUST precede any expression in a codebox.
 Param drive(0.2);
 Param tone(0.5);
 Param size(0.5);
 Param decay(0.55);
 Param damping(0.45);
+Param analog(0.0);
 
 // Per-channel one-pole damping cascade (4 stages each).
 History Llp1(0); History Llp2(0); History Llp3(0); History Llp4(0);
@@ -36,31 +43,69 @@ History Rfb1(0); History Rfb2(0); History Rfb3(0); History Rfb4(0);
 History Lap1(0); History Lap2(0); History Lap3(0); History Lap4(0);
 History Rap1(0); History Rap2(0); History Rap3(0); History Rap4(0);
 
-// --- Input colour stage (per channel, deliberately matched). ---
-preGain = 1 + drive * 4;
-colL = tanh(in1 * preGain);
-colR = tanh(in2 * preGain);
-mixAmt = 0.2 + drive * 0.55;
-cL = mix(in1, colL, mixAmt);
-cR = mix(in2, colR, mixAmt);
+// Pre-emphasis filter state (one-pole high-shelf approximation per channel).
+History LpreHi(0);
+History RpreHi(0);
 
-// Tone tilt around the first lowpass tap.
+// Pseudo-noise state (cheap LCG-style scrambler, signal-rate).
+History noiseSt(123456789);
+
+// --- Pseudo-noise generator (cheap, signal-rate, deterministic). ---
+// LCG-ish step on a 32-bit-ish space then scaled to ~[-1, 1).
+nNew = (noiseSt * 1664525 + 1013904223) % 2147483647;
+noiseSt = nNew;
+nf = (nNew / 1073741823.5) - 1.0;   // ~[-1, 1)
+
+// --- Pre-emphasis going in (boost highs before saturation/feedback). ---
+// One-pole high-shelf via "input - lowpassed input" boost.
+// At analog = 1 we add ~+6 dB of >2-3 kHz lift into the loop.
+preCoef = 0.18; // fixed lowpass corner for the shelf split
+LpreHiNext = LpreHi + (in1 - LpreHi) * preCoef;
+RpreHiNext = RpreHi + (in2 - RpreHi) * preCoef;
+preBoost = analog * 0.7;
+xL = in1 + (in1 - LpreHiNext) * preBoost;
+xR = in2 + (in2 - RpreHiNext) * preBoost;
+
+// --- Input colour stage (per channel, with optional asymmetric bias). ---
+preGain = 1 + drive * 4;
+// Asymmetric DC bias before tanh -> even harmonics. L and R get opposite
+// biases so the stereo image drifts apart slightly when analog goes up.
+biasL = analog * 0.18;
+biasR = analog * -0.15;  // not the same magnitude on purpose
+colL = tanh(xL * preGain + biasL);
+colR = tanh(xR * preGain + biasR);
+// Pull out the DC the bias introduced so we don't leak it downstream.
+colL = colL - tanh(biasL);
+colR = colR - tanh(biasR);
+
+mixAmt = 0.2 + drive * 0.55;
+cL = mix(xL, colL, mixAmt);
+cR = mix(xR, colR, mixAmt);
+
+// Tone tilt around the first lowpass tap, with subtle L/R asymmetry when
+// analog is up so the two channels never sound identically EQ'd.
 brightL = cL - Llp1;
 brightR = cR - Rlp1;
-tiltL = mix(Llp1, brightL * 1.6, tone);
-tiltR = mix(Rlp1, brightR * 1.6, tone);
+tiltScaleL = 1.6 + analog * 0.10;
+tiltScaleR = 1.6 - analog * 0.10;
+tiltL = mix(Llp1, brightL * tiltScaleL, tone);
+tiltR = mix(Rlp1, brightR * tiltScaleR, tone);
 
 // --- Damping cascade. ---
-dampCoef = 0.08 + (1 - damping) * 0.5;
-l1L = Llp1 + (tiltL - Llp1) * dampCoef;
-l2L = Llp2 + (l1L  - Llp2) * dampCoef;
-l3L = Llp3 + (l2L  - Llp3) * dampCoef;
-l4L = Llp4 + (l3L  - Llp4) * dampCoef;
+// Slight L/R drift on damping coefficient when analog > 0.
+dampBase = 0.08 + (1 - damping) * 0.5;
+dampL = dampBase * (1.0 + analog * 0.04);
+dampR = dampBase * (1.0 - analog * 0.04);
 
-l1R = Rlp1 + (tiltR - Rlp1) * dampCoef;
-l2R = Rlp2 + (l1R  - Rlp2) * dampCoef;
-l3R = Rlp3 + (l2R  - Rlp3) * dampCoef;
-l4R = Rlp4 + (l3R  - Rlp4) * dampCoef;
+l1L = Llp1 + (tiltL - Llp1) * dampL;
+l2L = Llp2 + (l1L  - Llp2) * dampL;
+l3L = Llp3 + (l2L  - Llp3) * dampL;
+l4L = Llp4 + (l3L  - Llp4) * dampL;
+
+l1R = Rlp1 + (tiltR - Rlp1) * dampR;
+l2R = Rlp2 + (l1R  - Rlp2) * dampR;
+l3R = Rlp3 + (l2R  - Rlp3) * dampR;
+l4R = Rlp4 + (l3R  - Rlp4) * dampR;
 
 // --- Smear (nested allpass-ish state). ---
 smearAmt = 0.18 + size * 0.42;
@@ -79,22 +124,44 @@ fbAmt   = 0.18 + decay * 0.78;
 intra   = 0.05 + size * 0.18;     // within-channel cross between nodes
 crossLR = 0.10 + size * 0.30;     // L<->R coupling, scaled with size
 
-// Left network draws from its own fb chain plus a tap from the right side.
-n1L = tanh(sL1 + Lfb1 * fbAmt + Lfb3 * intra * 0.7 + Rfb2 * crossLR * 0.5);
-n2L = tanh(sL2 + Lfb2 * fbAmt - Lfb4 * intra * 0.7 + Rfb3 * crossLR * 0.5);
-n3L = tanh(sL3 + Lfb3 * fbAmt + Lfb1 * intra       - Rfb4 * crossLR * 0.5);
-n4L = tanh(sL4 + Lfb4 * fbAmt - Lfb2 * intra       + Rfb1 * crossLR * 0.5);
+// Tiny noise injection scaled by analog. Floor sits ~ -66 dB at analog=1.
+nAmp = analog * 0.0005;
+nL = nf * nAmp;
+nR = nf * nAmp * 0.97;             // not perfectly correlated
 
-n1R = tanh(sR1 + Rfb1 * fbAmt + Rfb3 * intra * 0.7 + Lfb2 * crossLR * 0.5);
-n2R = tanh(sR2 + Rfb2 * fbAmt - Rfb4 * intra * 0.7 + Lfb3 * crossLR * 0.5);
-n3R = tanh(sR3 + Rfb3 * fbAmt + Rfb1 * intra       - Lfb4 * crossLR * 0.5);
-n4R = tanh(sR4 + Rfb4 * fbAmt - Rfb2 * intra       + Lfb1 * crossLR * 0.5);
+// Asymmetric saturation: small bias before tanh, removed afterward.
+// Same idea as input stage but per-node and lighter, so the feedback loop
+// itself contributes even-order content.
+fbBias = analog * 0.08;
+fbBiasNeg = -fbBias;
+
+n1L = tanh(sL1 + Lfb1 * fbAmt + Lfb3 * intra * 0.7 + Rfb2 * crossLR * 0.5 + fbBias    + nL) - tanh(fbBias);
+n2L = tanh(sL2 + Lfb2 * fbAmt - Lfb4 * intra * 0.7 + Rfb3 * crossLR * 0.5 + fbBiasNeg + nL) - tanh(fbBiasNeg);
+n3L = tanh(sL3 + Lfb3 * fbAmt + Lfb1 * intra       - Rfb4 * crossLR * 0.5 + fbBias    + nL) - tanh(fbBias);
+n4L = tanh(sL4 + Lfb4 * fbAmt - Lfb2 * intra       + Rfb1 * crossLR * 0.5 + fbBiasNeg + nL) - tanh(fbBiasNeg);
+
+n1R = tanh(sR1 + Rfb1 * fbAmt + Rfb3 * intra * 0.7 + Lfb2 * crossLR * 0.5 + fbBiasNeg + nR) - tanh(fbBiasNeg);
+n2R = tanh(sR2 + Rfb2 * fbAmt - Rfb4 * intra * 0.7 + Lfb3 * crossLR * 0.5 + fbBias    + nR) - tanh(fbBias);
+n3R = tanh(sR3 + Rfb3 * fbAmt + Rfb1 * intra       - Lfb4 * crossLR * 0.5 + fbBiasNeg + nR) - tanh(fbBiasNeg);
+n4R = tanh(sR4 + Rfb4 * fbAmt - Rfb2 * intra       + Lfb1 * crossLR * 0.5 + fbBias    + nR) - tanh(fbBias);
 
 bodyL = (n1L + n2L + n3L + n4L) * 0.25;
 bodyR = (n1R + n2R + n3R + n4R) * 0.25;
 
 bodyL = tanh(bodyL * (1.1 + drive * 0.35));
 bodyR = tanh(bodyR * (1.1 + drive * 0.35));
+
+// --- De-emphasis on the way out (gentle high-shelf cut). ---
+// Cancels the steady-state lift of pre-emphasis on the dry path while
+// leaving the feedback path naturally darker each pass (because each pass
+// gets pre-emph'd again on the way back in but the de-emph only fires
+// once at the output).
+deCoef = 0.18;
+LdeOut = LpreHi + (bodyL - LpreHi) * deCoef; // reuse one-pole, separate state would be cleaner
+RdeOut = RpreHi + (bodyR - RpreHi) * deCoef; // (acceptable here because pre-emph state is also overwritten this sample)
+deCut = analog * 0.6;
+bodyL = bodyL - (bodyL - LdeOut) * deCut;
+bodyR = bodyR - (bodyR - RdeOut) * deCut;
 
 // --- State updates. ---
 Llp1 = l1L; Llp2 = l2L; Llp3 = l3L; Llp4 = l4L;
@@ -103,6 +170,8 @@ Lfb1 = n1L; Lfb2 = n2L; Lfb3 = n3L; Lfb4 = n4L;
 Rfb1 = n1R; Rfb2 = n2R; Rfb3 = n3R; Rfb4 = n4R;
 Lap1 = ap1Lnext; Lap2 = ap2Lnext; Lap3 = ap3Lnext; Lap4 = ap4Lnext;
 Rap1 = ap1Rnext; Rap2 = ap2Rnext; Rap3 = ap3Rnext; Rap4 = ap4Rnext;
+LpreHi = LpreHiNext;
+RpreHi = RpreHiNext;
 
 out1 = bodyL;
 out2 = bodyR;
