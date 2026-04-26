@@ -1,0 +1,36 @@
+// coloured-shift-reverb : wet_mix.genexpr
+//
+// Equal-power dry/wet crossfade with a master output trim.
+// Sits at the end of the chain; takes the original dry stereo signal AND
+// the processed (reverb -> freq_shift) wet stereo signal and blends them.
+//
+// Inlets:
+//   in 1 : dry L
+//   in 2 : dry R
+//   in 3 : wet L
+//   in 4 : wet R
+// Outlets:
+//   out 1, out 2 : final stereo
+//
+// Params:
+//   mix    : 0..1, 0 = full dry, 1 = full wet (equal-power crossfade).
+//   output : 0..1, post-mix trim (0 = -inf, 1 = +6 dB ish). Default 0.5 = unity.
+
+Param mix(0.35);
+Param output(0.5);
+
+// Equal-power crossfade. cos/sin curve gives a natural, level-stable blend.
+// At mix = 0.5 both sides sit at -3 dB (sqrt(0.5)), summing back to ~0 dB
+// for uncorrelated wet vs dry signals. Audibly more "right" than a linear xfade.
+theta = mix * 1.5707963267948966; // mix * pi/2
+gDry  = cos(theta);
+gWet  = sin(theta);
+
+// output: 0 -> 0, 0.5 -> 1.0 (unity), 1 -> 2.0 (~+6 dB).
+trim = output * 2.0;
+
+mixedL = (in1 * gDry + in3 * gWet) * trim;
+mixedR = (in2 * gDry + in4 * gWet) * trim;
+
+out1 = mixedL;
+out2 = mixedR;
