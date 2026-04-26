@@ -23,24 +23,9 @@
 //                 the host patcher can scale this further if needed.
 //   stereoPhase : 0..1 carrier phase offset between L and R (decorrelation).
 
+// All Param + History declarations MUST precede any expression in a codebox.
 Param shift(0.0);
 Param stereoPhase(0.17);
-
-// --- Hilbert allpass coefficients (Niemitalo, ~95 dB image rejection). ---
-// Each section is a 2nd-order allpass: y[n] = c*(x[n] + y[n-2]) - x[n-2]
-// where c = a^2 of the published prototype root.
-
-// Path A (in-phase, 4 sections).
-ca1 = 0.4021921162426;
-ca2 = 0.8561710882420;
-ca3 = 0.9722909545651;
-ca4 = 0.9952884791278;
-
-// Path B (quadrature, 4 sections + 1 sample delay to align group delays).
-cb1 = 0.6923878000000;
-cb2 = 0.9360654322959;
-cb3 = 0.9882295226860;
-cb4 = 0.9987488452737;
 
 // --- Per-channel state for path A and path B (x[n-2], y[n-2] each). ---
 // Left
@@ -70,6 +55,22 @@ History phaseL(0);
 History phaseR(0);
 
 // ---------- Helpers expanded inline (genexpr has no stateful funcs). ----------
+
+// --- Hilbert allpass coefficients (Niemitalo, ~95 dB image rejection). ---
+// Each section is a 2nd-order allpass: y[n] = c*(x[n] + y[n-2]) - x[n-2]
+// where c = a^2 of the published prototype root.
+
+// Path A (in-phase, 4 sections).
+ca1 = 0.4021921162426;
+ca2 = 0.8561710882420;
+ca3 = 0.9722909545651;
+ca4 = 0.9952884791278;
+
+// Path B (quadrature, 4 sections + 1 sample delay to align group delays).
+cb1 = 0.6923878000000;
+cb2 = 0.9360654322959;
+cb3 = 0.9882295226860;
+cb4 = 0.9987488452737;
 
 // ===== LEFT =====
 xL = in1;
