@@ -1,0 +1,195 @@
+// tschiou-stab : tschiou_core.genexpr
+//
+// Short cinematic electric stab voice.
+//
+// Inlets:
+//   in1 : base frequency in Hz
+//   in2 : trigger impulse/gate (non-zero retriggers envelopes)
+//   in3 : velocity 0..1
+// Outlets:
+//   out1, out2 : stereo audio out
+//
+// Params:
+//   zap    : 0..1 noisy electrical transient amount
+//   drop   : 0..1 downward pitch sweep depth
+//   body   : 0..1 tonal weight / low-mid support
+//   bite   : 0..1 FM edge + saturation intensity
+//   width  : 0..1 stereo width of the short tail/high layer
+//   tail   : 0..1 short cinematic tail amount and regeneration
+//   length : 0..1 overall decay length
+//   tone   : 0..1 dark <-> bright tilt
+//   output : 0..1 final trim (0.5 ~ unity)
+
+Param zap(0.7);
+Param drop(0.65);
+Param body(0.6);
+Param bite(0.45);
+Param width(0.55);
+Param tail(0.35);
+Param length(0.35);
+Param tone(0.58);
+Param output(0.5);
+
+History envZap(0);
+History envBody(0);
+History envTail(0);
+History envPitch(0);
+
+History phaseMain(0);
+History phaseSub(0);
+History phaseFm(0);
+
+History noiseSt(1234567);
+
+History lpBody(0);
+History lpNoiseL(0);
+History lpNoiseR(0);
+History toneLpL(0);
+History toneLpR(0);
+History dcL(0);
+History dcR(0);
+
+Delay tailL(8192);
+Delay tailR(8192);
+History fbMemL(0);
+History fbMemR(0);
+
+// --- trigger + envelopes ---
+trig = in2 > 0;
+vel = clamp(in3, 0, 1);
+baseHz = max(in1, 20);
+
+zapMs   = 8  + (1 - length) * 45;
+bodyMs  = 60 + length * 260;
+tailMs  = 90 + length * 420 + tail * 260;
+pitchMs = 18 + drop * 120;
+
+zapCoef   = exp(log(0.001) / max(1, zapMs * samplerate * 0.001));
+bodyCoef  = exp(log(0.001) / max(1, bodyMs * samplerate * 0.001));
+tailCoef  = exp(log(0.001) / max(1, tailMs * samplerate * 0.001));
+pitchCoef = exp(log(0.001) / max(1, pitchMs * samplerate * 0.001));
+
+envZapN   = trig ? vel : envZap * zapCoef;
+envBodyN  = trig ? vel : envBody * bodyCoef;
+envTailN  = trig ? vel : envTail * tailCoef;
+envPitchN = trig ? 1   : envPitch * pitchCoef;
+
+// --- pseudo-noise source ---
+nNew = (noiseSt * 1664525 + 1013904223) % 2147483647;
+noiseSt = nNew;
+nf = (nNew / 1073741823.5) - 1.0;
+
+// decorrelated second stream by a cheap nonlinear warp
+nf2src = nf * 13.731 + 0.217;
+nf2 = (nf2src - floor(nf2src)) * 2 - 1;
+
+// --- pitch sweep + oscillator bank ---
+sweepSemi = 7 + drop * 29;
+ratio = pow(2, (envPitchN * sweepSemi) / 12);
+mainHz = baseHz * ratio;
+subHz  = max(20, baseHz * (0.5 + body * 0.18));
+fmHz   = mainHz * (1.7 + bite * 2.8);
+
+mainStep = mainHz / samplerate;
+subStep  = subHz / samplerate;
+fmStep   = fmHz / samplerate;
+
+pMain = phaseMain + mainStep; pMain = pMain - floor(pMain);
+pSub  = phaseSub  + subStep;  pSub  = pSub  - floor(pSub);
+pFm   = phaseFm   + fmStep;   pFm   = pFm   - floor(pFm);
+
+fmBurst = sin(pFm * 6.283185307179586) * envZapN * (0.15 + bite * 1.4);
+mainOsc = sin(pMain * 6.283185307179586 + fmBurst);
+subOsc  = sin(pSub  * 6.283185307179586);
+
+phaseMain = trig ? 0 : pMain;
+phaseSub  = trig ? 0 : pSub;
+phaseFm   = trig ? 0 : pFm;
+
+// --- tonal center body ---
+bodyMix = mainOsc * (0.75 + body * 0.2) + subOsc * (0.08 + body * 0.42);
+
+bodyCut = 0.03 + tone * 0.22;
+lpBodyN = lpBody + (bodyMix - lpBody) * bodyCut;
+bodyDryWet = 0.18 + tone * 0.32;
+bodyCore = (lpBodyN * (1 - bodyDryWet) + bodyMix * bodyDryWet) * envBodyN;
+
+// --- electrical transient/noise branch ---
+// bright band-passy transient built from HP-ish noise with slightly different L/R filtering
+noiseLpCutL = 0.10 + tone * 0.18;
+noiseLpCutR = 0.12 + tone * 0.16;
+lpNoiseLN = lpNoiseL + (nf  - lpNoiseL) * noiseLpCutL;
+lpNoiseRN = lpNoiseR + (nf2 - lpNoiseR) * noiseLpCutR;
+noiseHpL = nf  - lpNoiseLN;
+noiseHpR = nf2 - lpNoiseRN;
+
+// soften the top slightly so it reads "electric" rather than white-noise hiss
+noiseToneCut = 0.20 + tone * 0.18;
+toneLpLN = toneLpL + (noiseHpL - toneLpL) * noiseToneCut;
+toneLpRN = toneLpR + (noiseHpR - toneLpR) * noiseToneCut;
+
+zapAmt = (0.08 + zap * 0.92) * envZapN;
+noiseStabL = toneLpLN * zapAmt;
+noiseStabR = toneLpRN * zapAmt;
+
+// --- combine + colour ---
+centerMono = bodyCore + (noiseStabL + noiseStabR) * 0.18 + mainOsc * envZapN * bite * 0.12;
+
+satDrive = 1 + bite * 3.6 + zap * 0.6;
+centerSat = tanh(centerMono * satDrive);
+centerWet = 0.25 + bite * 0.5;
+center = centerMono * (1 - centerWet) + centerSat * centerWet;
+
+// --- short stereo tail ---
+// Feed mostly highs + a little body into a compact crossfed stereo diffuser.
+excite = (noiseStabL + noiseStabR) * 0.55 + center * (0.16 + tail * 0.24);
+
+baseDelayL = 170 + width * 120 + drop * 25;
+baseDelayR = 255 + width * 180 + drop * 40;
+readL = tailL.read(baseDelayL, interp="linear");
+readR = tailR.read(baseDelayR, interp="linear");
+
+fbAmt = 0.18 + tail * 0.58;
+fbDamp = 0.55 + tone * 0.25;
+fbInL = tanh((excite + readR * fbAmt) * (0.9 + bite * 0.4));
+fbInR = tanh((excite - readL * fbAmt) * (0.9 + bite * 0.4));
+
+// simple per-pass damping so repeats darken gracefully
+fbMemLN = fbMemL + (fbInL - fbMemL) * fbDamp;
+fbMemRN = fbMemR + (fbInR - fbMemR) * fbDamp;
+
+tailL.write(fbMemLN);
+tailR.write(fbMemRN);
+
+sideTailL = readL * envTailN * (0.35 + width * 0.75);
+sideTailR = readR * envTailN * (0.35 + width * 0.75);
+
+// --- output balance ---
+centerGain = 0.55 + body * 0.45;
+sideGain = 0.18 + tail * 0.42;
+
+rawL = center * centerGain + noiseStabL * 0.32 + sideTailL * sideGain;
+rawR = center * centerGain + noiseStabR * 0.32 + sideTailR * sideGain;
+
+// tiny DC cleanup / smoothing
+hpCoef = 0.995;
+dcLN = rawL + dcL * hpCoef;
+dcRN = rawR + dcR * hpCoef;
+dcL = dcLN - rawL;
+dcR = dcRN - rawR;
+
+trim = output * 2.0;
+out1 = dcLN * trim;
+out2 = dcRN * trim;
+
+envZap = envZapN;
+envBody = envBodyN;
+envTail = envTailN;
+envPitch = envPitchN;
+lpBody = lpBodyN;
+lpNoiseL = lpNoiseLN;
+lpNoiseR = lpNoiseRN;
+toneLpL = toneLpLN;
+toneLpR = toneLpRN;
+fbMemL = fbMemLN;
+fbMemR = fbMemRN;
